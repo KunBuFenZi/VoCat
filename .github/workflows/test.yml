@@ -86,7 +86,7 @@ jobs:
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
-          OUTPUT: dist/vocat-${{ matrix.target }}
+          OUTPUT: dist/vocat-linux-${{ matrix.goarch }}
         run: |
           mkdir -p dist
           go build -trimpath -ldflags "-s -w" -o "$OUTPUT" ./cmd/vocat
@@ -96,3 +96,10 @@ jobs:
             readelf -l "$OUTPUT" >&2
             exit 1
           fi
+      - name: Upload ${{ matrix.target }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: vocat-${{ matrix.target }}
+          path: dist/vocat-linux-${{ matrix.goarch }}
+          if-no-files-found: error
+          retention-days: 7
