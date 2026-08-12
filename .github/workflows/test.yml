@@ -1,0 +1,98 @@
+name: test
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build embedded web UI
+        working-directory: web
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+      - name: Upload embedded web UI
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+          if-no-files-found: error
+          retention-days: 1
+
+  test:
+    needs: web
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Download embedded web UI
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test ./...
+
+  cross-build:
+    needs: [web, test]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-amd64
+            goarch: amd64
+          - target: linux-arm64
+            goarch: arm64
+          - target: linux-aarch64
+            goarch: arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Download embedded web UI
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+      - name: Build ${{ matrix.target }}
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+          OUTPUT: dist/vocat-${{ matrix.target }}
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags "-s -w" -o "$OUTPUT" ./cmd/vocat
+          chmod 0755 "$OUTPUT"
+          if readelf -l "$OUTPUT" | grep -q 'Requesting program interpreter'; then
+            echo "ERROR: $OUTPUT unexpectedly requires a dynamic loader" >&2
+            readelf -l "$OUTPUT" >&2
+            exit 1
+          fi
