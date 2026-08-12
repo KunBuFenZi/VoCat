@@ -27,6 +27,7 @@ import (
 	"vocat/internal/extensions"
 	"vocat/internal/httpsmode"
 	"vocat/internal/loghub"
+	"vocat/internal/modem"
 	"vocat/internal/pcsc"
 	"vocat/internal/server"
 	"vocat/internal/store"
@@ -846,6 +847,13 @@ func provisionDiscoveredDevices(
 			control = candidate.ReaderName
 			deviceType = store.DeviceTypeUSBSIMReader
 			esimTransport = "pcsc"
+		}
+		if candidate.HardwareKind == modem.WWANHardwareKind {
+			// Integrated Qualcomm modems (MSM8916 "410" sticks) expose AT and QMI
+			// ports through the kernel wwan subsystem instead of a USB node. The
+			// QMI branch above already picked the QMI control path; this only
+			// assigns the dedicated device type.
+			deviceType = store.DeviceTypeWiFi410
 		}
 		name := candidate.Product
 		if name == "" || strings.EqualFold(name, "Android") {

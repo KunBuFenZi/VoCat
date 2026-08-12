@@ -55,10 +55,19 @@ func (manager *Manager) readSnapshot(
 	if ccidErr != nil {
 		ccid, ccidErr = manager.command(ctx, client, "AT+QCCID")
 	}
-	if ccidErr != nil {
-		snapshot.Warnings = append(snapshot.Warnings, "read ICCID: "+ccidErr.Error())
-	} else {
+	if ccidErr == nil {
 		snapshot.ICCID = parseICCIDIdentifier(ccid, []string{"+CCID:", "+QCCID:"}, 18, 22)
+	}
+	if snapshot.ICCID == "" {
+		// Some modem firmwares reject AT+CCID outright (notably the MSM8916 "410"
+		// stick). EF-ICCID is a mandatory transparent UICC file, so read it
+		// through CRSM before giving up on the identifier.
+		if response, crsmErr := manager.command(ctx, client, "AT+CRSM=176,12258,0,0,0"); crsmErr == nil {
+			snapshot.ICCID = parseEFICCID(response)
+		}
+	}
+	if snapshot.ICCID == "" {
+		snapshot.Warnings = append(snapshot.Warnings, "read ICCID: no AT+CCID, AT+QCCID, or EF-ICCID response")
 	}
 	previousICCID = strings.TrimSpace(previousICCID)
 	if previousICCID != "" && snapshot.ICCID != "" && !strings.EqualFold(previousICCID, snapshot.ICCID) {
@@ -162,6 +171,37 @@ func (manager *Manager) readSnapshot(
 	snapshot.Warnings = append(snapshot.Warnings, warnings...)
 	snapshot.UpdatedAt = time.Now().UTC()
 	return snapshot, nil
+}
+
+// parseEFICCID decodes an EF-ICCID transparent file read through AT+CRSM. The
+// file stores ICCID digits as nibble-swapped BCD with trailing F padding, for
+// example the bytes 0x98 0x01 ... decode to "8901...". A "F" nibble terminates
+// the identifier; the result must hold between 18 and 22 digits.
+func parseEFICCID(response modem.Response) string {
+	fields := csvValues(valueAfterPrefix(response, "+CRSM:"))
+	if len(fields) < 3 {
+		return ""
+	}
+	raw, err := hex.DecodeString(strings.Trim(strings.TrimSpace(fields[2]), `"`))
+	if err != nil {
+		return ""
+	}
+	var digits []byte
+	for _, octet := range raw {
+		for _, nibble := range []byte{octet & 0x0f, octet >> 4} {
+			if nibble == 0x0f {
+				break
+			}
+			if nibble > 9 {
+				return ""
+			}
+			digits = append(digits, '0'+nibble)
+		}
+	}
+	if len(digits) < 18 || len(digits) > 22 {
+		return ""
+	}
+	return string(digits)
 }
 
 func parseSPN(response modem.Response) string {

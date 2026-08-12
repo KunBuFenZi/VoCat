@@ -88,7 +88,10 @@ func NewManager(options Options) (*Manager, error) {
 		options.Discoverer = modem.NewSystemDiscoverer()
 	}
 	if options.Opener == nil {
-		options.Opener = modem.SerialOpener{}
+		// USB Quectel modems use a real serial port; integrated Qualcomm modems
+		// discovered through the wwan subsystem use raw character devices that
+		// reject termios configuration, so the opener is chosen per candidate.
+		options.Opener = modem.NewKindOpener(modem.SerialOpener{}, modem.RawOpener{})
 	}
 	if options.CommandTimeout <= 0 {
 		options.CommandTimeout = 3 * time.Second
@@ -335,7 +338,11 @@ func (manager *Manager) clientLocked(
 	if !candidate.HasATPort() {
 		return nil, ErrNoATPort
 	}
-	client, err := manager.opener.Open(ctx, candidate.ATPort)
+	opener := manager.opener
+	if kindOpener, ok := opener.(modem.KindOpener); ok {
+		opener = kindOpener.For(candidate)
+	}
+	client, err := opener.Open(ctx, candidate.ATPort)
 	if err != nil {
 		return nil, err
 	}

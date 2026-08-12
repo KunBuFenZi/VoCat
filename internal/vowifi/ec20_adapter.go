@@ -30,6 +30,7 @@ const (
 	usimAIDPrefix         = "A0000000871002"
 	isimAIDPrefix         = "A0000000871004"
 	efADDecimal           = 28589 // 0x6FAD
+	efICCIDDecimal        = 12258 // 0x2FE2
 	channelCleanupTimeout = 3 * time.Second
 )
 
@@ -324,7 +325,44 @@ func (adapter *EC20Adapter) readICCID(
 			}
 		}
 	}
+	// Some modem firmwares reject AT+CCID outright (notably the MSM8916 "410"
+	// stick). EF-ICCID is a mandatory transparent UICC file, so read it through
+	// CRSM as a last resort before failing.
+	if response, err := adapter.execute(
+		ctx,
+		deviceID,
+		fmt.Sprintf("AT+CRSM=176,%d,0,0,0", efICCIDDecimal),
+	); err == nil {
+		if data, parseErr := parseCRSMData(response); parseErr == nil {
+			if value := iccidFromEFBytes(data); value != "" {
+				return value, nil
+			}
+		}
+		lastErr = errors.New("CRSM returned no valid EF-ICCID")
+	}
 	return "", fmt.Errorf("read EC20 ICCID: %w", lastErr)
+}
+
+// iccidFromEFBytes decodes the nibble-swapped BCD payload of an EF-ICCID
+// transparent file. Trailing F padding terminates the identifier; the result
+// must hold between 18 and 22 digits.
+func iccidFromEFBytes(data []byte) string {
+	var digits []byte
+	for _, octet := range data {
+		for _, nibble := range []byte{octet & 0x0f, octet >> 4} {
+			if nibble == 0x0f {
+				break
+			}
+			if nibble > 9 {
+				return ""
+			}
+			digits = append(digits, '0'+nibble)
+		}
+	}
+	if len(digits) < 18 || len(digits) > 22 {
+		return ""
+	}
+	return string(digits)
 }
 
 func (adapter *EC20Adapter) CheckReady(
