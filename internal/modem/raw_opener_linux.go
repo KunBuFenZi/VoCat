@@ -18,7 +18,8 @@ const defaultRawReadTimeout = 100 * time.Millisecond
 // RS-232 serial lines. Integrated Qualcomm modems exposed through the kernel
 // wwan subsystem (for example the MSM8916 "410" sticks) provide /dev/wwan0at0
 // rpmsg endpoints where termios settings are unsupported and go.bug.st/serial
-// cannot open the node. Reads use a polling deadline compatible with Session.
+// cannot open the node. Reads poll with a short per-port deadline, mirroring
+// the blocking-serial behavior Session already expects.
 type RawOpener struct {
 	SessionOptions SessionOptions
 }
@@ -35,7 +36,7 @@ func (opener RawOpener) Open(ctx context.Context, port Port) (Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open AT port %s: %w", path, err)
 	}
-	session, err := NewSession(rawPort{file: file, readTimeout: defaultRawReadTimeout}, opener.SessionOptions)
+	session, err := NewSession(&rawPort{file: file, readTimeout: defaultRawReadTimeout}, opener.SessionOptions)
 	if err != nil {
 		_ = file.Close()
 		return nil, err
@@ -45,28 +46,34 @@ func (opener RawOpener) Open(ctx context.Context, port Port) (Client, error) {
 
 // rawPort adapts a raw character device to the Session Transport contract.
 // Termios configuration is deliberately skipped: wwan rpmsg endpoints reject
-// ioctls, so reads poll with a short per-port deadline exactly like a serial
-// port. os.File deadlines are safe to set on every read because Session holds
-// its own mutex around each exchange.
+// ioctls. Reads set a short per-port deadline and treat a deadline expiry as a
+// timeout with no data, exactly like a blocking serial port, so Session keeps
+// polling until its command deadline instead of poisoning the session. os.File
+// deadlines are safe to set on every read because Session holds its own mutex
+// around each exchange.
 type rawPort struct {
 	file        *os.File
 	readTimeout time.Duration
 }
 
-func (port rawPort) Read(buffer []byte) (int, error) {
+func (port *rawPort) Read(buffer []byte) (int, error) {
 	_ = port.file.SetReadDeadline(time.Now().Add(port.readTimeout))
-	return port.file.Read(buffer)
+	count, err := port.file.Read(buffer)
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		return 0, nil
+	}
+	return count, err
 }
 
-func (port rawPort) Write(payload []byte) (int, error) {
+func (port *rawPort) Write(payload []byte) (int, error) {
 	return port.file.Write(payload)
 }
 
-func (port rawPort) Close() error {
+func (port *rawPort) Close() error {
 	return port.file.Close()
 }
 
-func (port rawPort) Drain() error {
+func (port *rawPort) Drain() error {
 	return nil
 }
 
@@ -74,11 +81,11 @@ func (port rawPort) Drain() error {
 // kernel supports it. Raw wwan endpoints that reject the ioctl are left
 // untouched: a non-blocking drain cannot discard already-buffered rpmsg bytes,
 // but the session's URC queue still tolerates spurious lines.
-func (port rawPort) ResetInputBuffer() error {
+func (port *rawPort) ResetInputBuffer() error {
 	return resetRawInput(port.file)
 }
 
-func (port rawPort) SetReadTimeout(timeout time.Duration) error {
+func (port *rawPort) SetReadTimeout(timeout time.Duration) error {
 	if timeout <= 0 {
 		return errors.New("modem: read timeout must be positive")
 	}
